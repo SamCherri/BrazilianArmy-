@@ -1,2 +1,2 @@
-main.py
-requirements.txt
+discord.py==2.3.2
+PyYAML==6.0.1
