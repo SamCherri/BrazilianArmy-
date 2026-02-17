@@ -1,0 +1,77 @@
+gate_role:
+  name: "📝 Não Registrado"
+  color: "#444444"
+
+default_role: "🪖 Recruta"
+default_role_color: "#7A7A7A"
+
+registration:
+  category_name: "📝 CADASTRO"
+  channel_name: "registrar"
+  nick_prefix: "Rec"
+  max_game_name: 24
+
+# Estrutura básica (Death Zone Online + pegada militar)
+structure:
+  categories:
+    - name: "📢 INFORMAÇÕES"
+      channels:
+        - name: "boas-vindas"
+          type: "text"
+          topic: "Leia antes de tudo."
+        - name: "regras"
+          type: "text"
+          topic: "Regras do clã e do servidor."
+        - name: "avisos"
+          type: "text"
+          topic: "Comunicados oficiais."
+
+    - name: "💬 COMUNIDADE"
+      channels:
+        - name: "chat-geral"
+          type: "text"
+          topic: "Conversa geral."
+        - name: "clipes-e-print"
+          type: "text"
+          topic: "Prints e clipes do jogo."
+        - name: "duvidas-suporte"
+          type: "text"
+          topic: "Dúvidas e suporte."
+        - name: "geral-voz"
+          type: "voice"
+          user_limit: null
+
+    - name: "🎮 DEATH ZONE ONLINE"
+      channels:
+        - name: "lobby"
+          type: "text"
+          topic: "Convites e organização de dupla."
+        - name: "aguardando-partida"
+          type: "voice"
+          user_limit: null
+
+        # 5 salas DUO (2 vagas cada)
+        - name: "duo-1"
+          type: "voice"
+          user_limit: 2
+        - name: "duo-2"
+          type: "voice"
+          user_limit: 2
+        - name: "duo-3"
+          type: "voice"
+          user_limit: 2
+        - name: "duo-4"
+          type: "voice"
+          user_limit: 2
+        - name: "duo-5"
+          type: "voice"
+          user_limit: 2
+
+    - name: "🛠️ STAFF"
+      channels:
+        - name: "staff-chat"
+          type: "text"
+          topic: "Canal interno da staff."
+        - name: "staff-voz"
+          type: "voice"
+          user_limit: null
