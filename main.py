@@ -54,8 +54,8 @@ class ChannelDef:
 
 @dataclass
 class CategoryDef:
-    name: str          # display (com emoji)
-    raw_name: str      # sem emoji, para matching
+    name: str
+    raw_name: str
     emoji: str
     channels: List[ChannelDef]
 
@@ -91,7 +91,7 @@ ROLE_PENDING = str(REG_CFG.get("unregistered_role_name", "⛔ Pendente")).strip(
 ROLE_MEMBER = str(REG_CFG.get("registered_role_name", "✅ Membro")).strip()
 
 REQUIRE_MEMBER_ROLE = bool(REG_CFG.get("require_registered_role", True))
-BYPASS_ROLES = set((REG_CFG.get("bypass_roles") or []))
+BYPASS_ROLES = set((REG_CFG.get("bypass_roles") or []))  # ex: ["🛡️ Moderação"]
 
 NICK_PREFIX = str(REG_CFG.get("nickname_prefix", "") or "").strip()  # se vazio usa "[TAG] "
 
@@ -106,7 +106,7 @@ if not DISCORD_TOKEN:
 
 intents = discord.Intents.default()
 intents.guilds = True
-intents.members = True
+intents.members = True  # obrigatório para checar membros
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -130,7 +130,7 @@ def build_role_defs(cfg: dict) -> List[RoleDef]:
             )
         )
 
-    # garante cargos base do fluxo de entrada
+    # garante os 2 cargos-base do fluxo
     names = {x.name for x in out}
     if ROLE_MEMBER not in names:
         out.append(RoleDef(name=ROLE_MEMBER, color=hex_to_int_color("#2ECC71"), hoist=True))
@@ -142,7 +142,7 @@ def build_role_defs(cfg: dict) -> List[RoleDef]:
 def build_categories(cfg: dict) -> List[CategoryDef]:
     out: List[CategoryDef] = []
 
-    # categoria de entrada sempre existe (primeira)
+    # ENTRADA sempre existe
     entry_channels = [
         ChannelDef(
             name=ENTRY_CHANNEL_NAME,
@@ -174,7 +174,6 @@ def build_categories(cfg: dict) -> List[CategoryDef]:
             cname = str(ch.get("name", "")).strip()
             if not cname:
                 continue
-
             ctype = str(ch.get("type", "text")).strip().lower()
             if ctype not in ("text", "voice"):
                 ctype = "text"
@@ -189,14 +188,7 @@ def build_categories(cfg: dict) -> List[CategoryDef]:
                 )
             )
 
-        out.append(
-            CategoryDef(
-                name=display,
-                raw_name=raw,
-                emoji=emoji,
-                channels=channels,
-            )
-        )
+        out.append(CategoryDef(name=display, raw_name=raw, emoji=emoji, channels=channels))
 
     return out
 
@@ -217,12 +209,7 @@ async def ensure_role(guild: discord.Guild, rdef: RoleDef) -> discord.Role:
                 or existing.mentionable != rdef.mentionable
             )
             if changed:
-                await existing.edit(
-                    color=color,
-                    hoist=rdef.hoist,
-                    mentionable=rdef.mentionable,
-                    reason="Sync role",
-                )
+                await existing.edit(color=color, hoist=rdef.hoist, mentionable=rdef.mentionable, reason="Sync role")
         except discord.Forbidden:
             pass
         return existing
@@ -290,19 +277,17 @@ async def ensure_voice_channel(
 
 
 # =========================
-# Visibility rules
+# Visibility rules (só libera após registro)
 # =========================
 
 def has_any_bypass_role(member: discord.Member) -> bool:
-    if not BYPASS_ROLES:
-        return False
-    return any(r.name in BYPASS_ROLES for r in member.roles)
+    return any(r.name in BYPASS_ROLES for r in member.roles) if BYPASS_ROLES else False
 
 async def ensure_entry_channel_visibility(guild: discord.Guild, ch: discord.TextChannel) -> int:
     """
-    Entrada:
-      - @everyone: vê, mas não fala
-      - Pendente: vê, mas não fala
+    ENTRADA:
+      - @everyone: vê, não fala
+      - Pendente: vê, não fala
       - Membro: vê e fala
     """
     role_member = discord.utils.get(guild.roles, name=ROLE_MEMBER)
@@ -356,7 +341,7 @@ async def ensure_entry_channel_visibility(guild: discord.Guild, ch: discord.Text
 
 async def ensure_category_lockdown(guild: discord.Guild, category: discord.CategoryChannel) -> int:
     """
-    Fora a ENTRADA:
+    TODAS as outras categorias:
       - @everyone: não vê
       - Pendente: não vê
       - Membro: vê
@@ -397,7 +382,7 @@ async def ensure_category_lockdown(guild: discord.Guild, category: discord.Categ
 
 
 # =========================
-# Aggressive purge (not in config)
+# Aggressive purge: channels/categories not in config
 # =========================
 
 def protected_channel_ids(guild: discord.Guild) -> Set[int]:
@@ -407,9 +392,6 @@ def protected_channel_ids(guild: discord.Guild) -> Set[int]:
             prot.add(ch.id)
     return prot
 
-def desired_structure(cfg: dict) -> List[CategoryDef]:
-    return build_categories(cfg)
-
 async def aggressive_purge_not_in_config(guild: discord.Guild, cats: List[CategoryDef]) -> Tuple[int, int]:
     deleted_channels = 0
     deleted_categories = 0
@@ -417,16 +399,16 @@ async def aggressive_purge_not_in_config(guild: discord.Guild, cats: List[Catego
     protected = protected_channel_ids(guild)
     desired_cat_names = set(c.name for c in cats)
     desired_per_cat = {c.name: set(ch.name for ch in c.channels) for c in cats}
+
     desired_all_channels = set()
     for c in cats:
         for ch in c.channels:
             desired_all_channels.add(ch.name)
 
-    # 1) remove canais extras dentro de categorias existentes no config
+    # 1) remover canais extras dentro de categorias do config
     for cat in list(guild.categories):
         if cat.name in PRESERVE_CATEGORIES:
             continue
-
         if cat.name in desired_cat_names:
             desired_names = desired_per_cat.get(cat.name, set())
 
@@ -450,7 +432,7 @@ async def aggressive_purge_not_in_config(guild: discord.Guild, cats: List[Catego
                     except discord.Forbidden:
                         pass
 
-    # 2) remove canais fora de categoria que não existem no config
+    # 2) remover canais soltos (sem categoria) que não estão no config
     for ch in list(guild.channels):
         if getattr(ch, "id", None) in protected:
             continue
@@ -465,7 +447,7 @@ async def aggressive_purge_not_in_config(guild: discord.Guild, cats: List[Catego
                 except discord.Forbidden:
                     pass
 
-    # 3) remove categorias fora do config (apaga canais dentro)
+    # 3) remover categorias fora do config (apagando canais dentro)
     for cat in list(guild.categories):
         if cat.name in PRESERVE_CATEGORIES:
             continue
@@ -495,7 +477,7 @@ async def aggressive_purge_not_in_config(guild: discord.Guild, cats: List[Catego
 
 
 # =========================
-# Roles sync + purge
+# Aggressive roles: delete roles not in config
 # =========================
 
 def role_is_protected(guild: discord.Guild, role: discord.Role) -> bool:
@@ -520,7 +502,7 @@ async def sync_roles_aggressive(guild: discord.Guild, desired: List[RoleDef]) ->
         ensured.append(r)
         created_or_updated += 1
 
-    # reorder roles: bloco abaixo do topo do bot
+    # reorder: bloco abaixo do topo do bot
     try:
         bot_top = guild.me.top_role.position
         movable = [r for r in ensured if r.position < bot_top and not r.managed and not r.is_default()]
@@ -563,16 +545,10 @@ async def sync_roles_aggressive(guild: discord.Guild, desired: List[RoleDef]) ->
 
 
 # =========================
-# Member enforcement
+# Member enforcement: quem não tem ✅ Membro fica pendente e não vê canais
 # =========================
 
 async def enforce_membership(guild: discord.Guild) -> Tuple[int, int, int, int]:
-    """
-    Se REQUIRE_MEMBER_ROLE=True:
-      - todo membro sem ROLE_MEMBER (e sem bypass) recebe ROLE_PENDING
-      - se tiver ROLE_MEMBER, remove ROLE_PENDING
-    Retorna: (pending_added, pending_removed, without_member_role, bypass_count)
-    """
     role_member = discord.utils.get(guild.roles, name=ROLE_MEMBER)
     role_pending = discord.utils.get(guild.roles, name=ROLE_PENDING)
     if not role_member or not role_pending:
@@ -580,7 +556,7 @@ async def enforce_membership(guild: discord.Guild) -> Tuple[int, int, int, int]:
 
     pending_added = 0
     pending_removed = 0
-    without_member_role = 0
+    without_member = 0
     bypass_count = 0
 
     for m in guild.members:
@@ -594,8 +570,9 @@ async def enforce_membership(guild: discord.Guild) -> Tuple[int, int, int, int]:
         has_pending = role_pending in m.roles
 
         if not has_member:
-            without_member_role += 1
+            without_member += 1
 
+        # se tem membro, tira pendente
         if has_member and has_pending:
             try:
                 await m.remove_roles(role_pending, reason="Enforce: member cannot be pending")
@@ -604,6 +581,7 @@ async def enforce_membership(guild: discord.Guild) -> Tuple[int, int, int, int]:
                 pass
             continue
 
+        # se exige membro, adiciona pendente em quem não tem
         if REQUIRE_MEMBER_ROLE and (not has_member) and (not has_pending):
             try:
                 await m.add_roles(role_pending, reason="Enforce: missing member role -> pending")
@@ -611,7 +589,7 @@ async def enforce_membership(guild: discord.Guild) -> Tuple[int, int, int, int]:
             except discord.Forbidden:
                 pass
 
-    return pending_added, pending_removed, without_member_role, bypass_count
+    return pending_added, pending_removed, without_member, bypass_count
 
 
 # =========================
@@ -658,7 +636,7 @@ class EntryModal(discord.ui.Modal, title="Entrada do clã"):
             await member.edit(nick=new_nick, reason="Entry: set nickname")
         except discord.Forbidden:
             return await interaction.response.send_message(
-                "Não consegui mudar o apelido. Dê ao bot **Gerenciar Apelidos** e coloque o cargo do bot acima dos outros.",
+                "Não consegui mudar o apelido. Dê ao bot **Gerenciar Apelidos** e coloque o cargo do bot acima.",
                 ephemeral=True,
             )
 
@@ -675,7 +653,7 @@ class EntryModal(discord.ui.Modal, title="Entrada do clã"):
 
         await interaction.response.send_message(
             f"✅ Acesso liberado.\nSeu nick agora é **{new_nick}**.",
-            ephemeral=True
+            ephemeral=True,
         )
 
 class EntryView(discord.ui.View):
@@ -734,31 +712,34 @@ async def on_member_join(member: discord.Member):
                 pass
 
 
-@bot.tree.command(name="setup", description="AGRESSIVO: aplica o config e apaga tudo que não estiver nele. Também verifica membros sem acesso.")
+@bot.tree.command(
+    name="setup",
+    description="AGRESSIVO: aplica o config, apaga cargos/canais/categorias fora do padrão e força registro para liberar canais."
+)
 @app_commands.checks.has_permissions(administrator=True)
 async def setup_cmd(interaction: discord.Interaction):
     guild = interaction.guild
     if guild is None:
-        return await interaction.response.send_message("Use isso dentro de um servidor.", ephemeral=True)
+        return await interaction.response.send_message("Use dentro de um servidor.", ephemeral=True)
 
     await interaction.response.send_message(
-        f"⏳ Setup agressivo: aplicando config + limpeza total — **{CLAN_NAME}** ({GAME_NAME})...",
+        f"⏳ Setup agressivo: aplicando config + limpando fora do padrão — **{CLAN_NAME}** ({GAME_NAME})...",
         ephemeral=True,
     )
 
-    cats = desired_structure(CONFIG)
+    cats = build_categories(CONFIG)
     role_defs = build_role_defs(CONFIG)
 
-    # 1) roles (cria/atualiza + apaga o resto)
+    # 1) CARGOS: cria/atualiza + apaga o resto
     ru, rdel, rskip = await sync_roles_aggressive(guild, role_defs)
 
-    # 2) cria/ajusta categorias/canais do config
+    # 2) CATEGORIAS/CANAIS: cria/ajusta
     entry_channel: Optional[discord.TextChannel] = None
 
     for cdef in cats:
         cat = await ensure_category(guild, cdef.name)
 
-        # trava todas menos ENTRADA
+        # trava tudo exceto ENTRADA
         if norm(cdef.raw_name) != norm(ENTRY_CATEGORY_NAME):
             await ensure_category_lockdown(guild, cat)
 
@@ -770,7 +751,7 @@ async def setup_cmd(interaction: discord.Interaction):
                 if norm(tch.name) == norm(ENTRY_CHANNEL_NAME) and norm(cdef.raw_name) == norm(ENTRY_CATEGORY_NAME):
                     entry_channel = tch
 
-    # 3) painel de entrada + permissões
+    # 3) ENTRADA: permissões + painel
     panel_sent = 0
     if entry_channel:
         await ensure_entry_channel_visibility(guild, entry_channel)
@@ -786,28 +767,28 @@ async def setup_cmd(interaction: discord.Interaction):
         except discord.Forbidden:
             pass
 
-    # 4) PURGE TOTAL: apaga tudo que não está no config
+    # 4) CANAIS/CATEGORIAS: apaga tudo fora do config
     del_ch = del_cat = 0
     if AGGRESSIVE_CHANNELS:
         del_ch, del_cat = await aggressive_purge_not_in_config(guild, cats)
 
-    # 5) verificação de membros
+    # 5) MEMBROS: forçar pendente em quem não tem ✅ Membro
     pending_added, pending_removed, without_member, bypass_count = await enforce_membership(guild)
 
     await interaction.followup.send(
-        "✅ Setup finalizado.\n"
-        f"🧹 Limpeza: canais removidos **{del_ch}**, categorias removidas **{del_cat}**.\n"
-        f"🎭 Cargos: sync **{ru}**, removidos **{rdel}**, ignorados **{rskip}**.\n"
-        f"🧾 Acesso: pendentes adicionados **{pending_added}**, pendentes removidos **{pending_removed}**.\n"
-        f"📌 Sem '{ROLE_MEMBER}': **{without_member}** | bypass: **{bypass_count}**.\n"
+        "✅ Finalizado.\n"
+        f"🎭 Cargos: removidos fora do padrão **{rdel}** (ignorados: **{rskip}**).\n"
+        f"🧹 Estrutura: canais removidos **{del_ch}**, categorias removidas **{del_cat}**.\n"
+        f"🧾 Registro: pendentes adicionados **{pending_added}**, pendentes removidos **{pending_removed}**.\n"
+        f"📌 Sem '{ROLE_MEMBER}' (sem registro): **{without_member}** | bypass: **{bypass_count}**.\n"
         f"🧩 Painel enviado: **{panel_sent}**.",
         ephemeral=True,
     )
 
 
-@bot.tree.command(name="status_membros", description="Mostra quantos estão sem acesso e quantos estão pendentes.")
+@bot.tree.command(name="status_registro", description="Mostra quantos estão sem registro e quantos estão pendentes.")
 @app_commands.checks.has_permissions(administrator=True)
-async def status_membros(interaction: discord.Interaction):
+async def status_registro(interaction: discord.Interaction):
     guild = interaction.guild
     if guild is None:
         return await interaction.response.send_message("Use dentro do servidor.", ephemeral=True)
@@ -833,8 +814,8 @@ async def status_membros(interaction: discord.Interaction):
             pending += 1
 
     await interaction.response.send_message(
-        f"📌 Sem '{ROLE_MEMBER}': **{without_member}**\n"
-        f"⛔ Com '{ROLE_PENDING}': **{pending}**\n"
+        f"📌 Sem '{ROLE_MEMBER}' (sem registro): **{without_member}**\n"
+        f"⛔ Com '{ROLE_PENDING}' (pendente): **{pending}**\n"
         f"🛡️ Bypass: **{bypass}**",
         ephemeral=True,
     )
