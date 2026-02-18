@@ -21,7 +21,7 @@ registration:
   unregistered_role_name: "⛔ Pendente"
   registered_role_name: "✅ Membro"
   ping_on_join_in_channel: false
-  audit_interval_min: 10
+  audit_interval_min: 10 
 
   # NOVO: se true, todo membro sem ✅ Membro vira ⛔ Pendente (mesmo que tenha outros cargos), salvo bypass_roles.
   require_registered_role: true
