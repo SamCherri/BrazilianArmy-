@@ -6,6 +6,8 @@ clan:
 sync:
   aggressive_channels: true
   aggressive_roles: true
+
+  # Se quiser proteger algo para não ser deletado:
   preserve_categories: []
   preserve_channels: []
   preserve_roles: []
@@ -16,14 +18,17 @@ registration:
   category_emoji: "🧟"
   channel_name: "entrada"
 
-  nickname_prefix: ""   # se vazio, usa "[BZC] Nome"
+  nickname_prefix: ""   # se vazio usa "[BZC] Nome"
   unregistered_role_name: "⛔ Pendente"
   registered_role_name: "✅ Membro"
 
   ping_on_join_in_channel: false
   audit_interval_min: 10
 
+  # Força: sem ✅ Membro => vira ⛔ Pendente (e não vê canais)
   require_registered_role: true
+
+  # Quem tiver algum desses cargos não entra na regra de pendente (opcional)
   bypass_roles:
     - "🛡️ Moderação"
 
