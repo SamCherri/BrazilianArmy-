@@ -1,7 +1,6 @@
 import os
-import asyncio
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Set, Tuple
+from typing import List, Optional, Set
 
 import discord
 from discord import app_commands
@@ -67,14 +66,15 @@ class CategoryDef:
 CONFIG = load_config("config.yaml")
 
 REG_CFG = CONFIG.get("registration", {})
-REGISTER_CHANNEL_NAME = REG_CFG.get("channel_name", "📋-registrar-se")
+REGISTER_CHANNEL_NAME = str(REG_CFG.get("channel_name", "📋-registrar-se"))
 FORCE_ON_JOIN = bool(REG_CFG.get("force_on_join", True))
+
+# Opção A: nickname_prefix vazio -> nick fica exatamente igual ao nome do jogo
 NICK_PREFIX = str(REG_CFG.get("nickname_prefix", "") or "")
+
 ROLE_UNREG = str(REG_CFG.get("unregistered_role_name", "⛔ Não Registrado"))
 ROLE_REG = str(REG_CFG.get("registered_role_name", "✅ Registrado"))
 PING_ON_JOIN = bool(REG_CFG.get("ping_on_join_in_channel", False))
-
-# a cada quantos minutos revalidar membros “sem cargo”
 AUDIT_INTERVAL_MIN = int(REG_CFG.get("audit_interval_min", 10))
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
@@ -88,7 +88,7 @@ if not DISCORD_TOKEN:
 
 intents = discord.Intents.default()
 intents.guilds = True
-intents.members = True  # obrigatório para varrer membros
+intents.members = True  # necessário para varrer membros
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -209,78 +209,17 @@ def build_categories(cfg: dict) -> List[CategoryDef]:
 
 
 # =========================
-# Registration UI
-# =========================
-
-class RegisterModal(discord.ui.Modal, title="Cadastro Death Zone Online"):
-    game_name = discord.ui.TextInput(
-        label="Seu nome no jogo",
-        placeholder="Ex: Sam Cherri",
-        min_length=3,
-        max_length=32,
-        required=True,
-    )
-
-    async def on_submit(self, interaction: discord.Interaction):
-        guild = interaction.guild
-        member = interaction.user
-        if guild is None or not isinstance(member, discord.Member):
-            return await interaction.response.send_message("Erro: guild/member inválido.", ephemeral=True)
-
-        reg_role = discord.utils.get(guild.roles, name=ROLE_REG)
-        unreg_role = discord.utils.get(guild.roles, name=ROLE_UNREG)
-        if not reg_role or not unreg_role:
-            return await interaction.response.send_message("Erro: cargos base não existem. Rode /setup.", ephemeral=True)
-
-        new_nick = f"{NICK_PREFIX}{self.game_name.value}".strip()
-
-        # troca apelido
-        try:
-            await member.edit(nick=new_nick, reason="Cadastro: set nickname")
-        except discord.Forbidden:
-            return await interaction.response.send_message(
-                "Não consegui mudar seu apelido. O bot precisa de 'Gerenciar Apelidos' e estar acima dos cargos.",
-                ephemeral=True,
-            )
-
-        # ajusta cargos
-        try:
-            if unreg_role in member.roles:
-                await member.remove_roles(unreg_role, reason="Cadastro: remove unregistered")
-            if reg_role not in member.roles:
-                await member.add_roles(reg_role, reason="Cadastro: add registered")
-        except discord.Forbidden:
-            return await interaction.response.send_message(
-                "Não consegui mexer nos cargos. O bot precisa de 'Gerenciar Cargos' e estar acima dos cargos.",
-                ephemeral=True,
-            )
-
-        await interaction.response.send_message(
-            f"✅ Registrado com sucesso. Seu nick agora é **{new_nick}**.",
-            ephemeral=True,
-        )
-
-class RegisterView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Cadastrar", style=discord.ButtonStyle.success, emoji="✅", custom_id="register_button")
-    async def register_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(RegisterModal())
-
-
-# =========================
-# Enforcement: “sem cargo” => Não Registrado
+# Enforcement: members
 # =========================
 
 def is_member_without_roles(member: discord.Member) -> bool:
     # member.roles sempre contém @everyone; sem cargos => len == 1
     return (not member.bot) and len(member.roles) <= 1
 
-async def enforce_unregistered_for_no_role_members(guild: discord.Guild) -> Tuple[int, int]:
+async def enforce_unregistered_for_no_role_members(guild: discord.Guild) -> tuple[int, int]:
     """
-    Coloca 'Não Registrado' em quem está sem cargos.
-    Também remove 'Não Registrado' de quem já tem 'Registrado' (consistência).
+    - Adiciona 'Não Registrado' para membros sem cargo.
+    - Remove 'Não Registrado' de quem já tem 'Registrado' (consistência).
     """
     reg_role = discord.utils.get(guild.roles, name=ROLE_REG)
     unreg_role = discord.utils.get(guild.roles, name=ROLE_UNREG)
@@ -294,7 +233,6 @@ async def enforce_unregistered_for_no_role_members(guild: discord.Guild) -> Tupl
         if m.bot:
             continue
 
-        # já registrado -> garante que não fica como não registrado
         if reg_role in m.roles and unreg_role in m.roles:
             try:
                 await m.remove_roles(unreg_role, reason="Enforce: registered cannot be unregistered")
@@ -303,7 +241,6 @@ async def enforce_unregistered_for_no_role_members(guild: discord.Guild) -> Tupl
                 pass
             continue
 
-        # sem cargo -> vira não registrado
         if is_member_without_roles(m) and (reg_role not in m.roles) and (unreg_role not in m.roles):
             try:
                 await m.add_roles(unreg_role, reason="Enforce: no roles -> unregistered")
@@ -315,7 +252,7 @@ async def enforce_unregistered_for_no_role_members(guild: discord.Guild) -> Tupl
 
 
 # =========================
-# Enforcement: “Não Registrado só vê o canal registrar”
+# Enforcement: visibility
 # =========================
 
 def protected_channel_ids(guild: discord.Guild) -> Set[int]:
@@ -325,11 +262,11 @@ def protected_channel_ids(guild: discord.Guild) -> Set[int]:
             prot.add(ch.id)
     return prot
 
-async def enforce_visibility_rules(guild: discord.Guild) -> Tuple[int, int]:
+async def enforce_visibility_rules(guild: discord.Guild) -> tuple[int, int]:
     """
     Regra:
-      - Em TODOS os canais/categorias: NÃO REGISTRADO não pode ver
-      - EXCEÇÃO: canal de registro -> NÃO REGISTRADO pode ver (mas não falar)
+      - Em TODOS os canais/categorias: 'Não Registrado' não pode ver
+      - EXCEÇÃO: canal de registro -> 'Não Registrado' pode ver, mas não falar
     """
     reg_role = discord.utils.get(guild.roles, name=ROLE_REG)
     unreg_role = discord.utils.get(guild.roles, name=ROLE_UNREG)
@@ -337,74 +274,127 @@ async def enforce_visibility_rules(guild: discord.Guild) -> Tuple[int, int]:
         return 0, 0
 
     protected = protected_channel_ids(guild)
-
     changed_categories = 0
     changed_channels = 0
 
-    # 1) Categorias: negar view_channel para Não Registrado
+    # categorias: unreg não vê
     for cat in guild.categories:
         try:
             ow = cat.overwrites
-            # não mexe se não tiver permissão
             ow_unreg = ow.get(unreg_role, discord.PermissionOverwrite())
             if ow_unreg.view_channel is not False:
                 ow_unreg.view_channel = False
                 ow[unreg_role] = ow_unreg
-                await cat.edit(overwrites=ow, reason="Enforce: unregistered hidden on categories")
+                await cat.edit(overwrites=ow, reason="Enforce: hide unregistered on categories")
                 changed_categories += 1
         except discord.Forbidden:
             pass
 
-    # 2) Canais: todos negam Não Registrado, exceto o canal de registro
+    # canais: unreg não vê, exceto registrar
     for ch in guild.channels:
-        if isinstance(ch, (discord.TextChannel, discord.VoiceChannel)):
-            if ch.id in protected:
-                continue
+        if not isinstance(ch, (discord.TextChannel, discord.VoiceChannel)):
+            continue
+        if ch.id in protected:
+            continue
 
-            is_register_channel = (norm(ch.name) == norm(REGISTER_CHANNEL_NAME))
+        is_register = (norm(ch.name) == norm(REGISTER_CHANNEL_NAME))
 
-            try:
-                ow = ch.overwrites
+        try:
+            ow = ch.overwrites
 
-                if is_register_channel:
-                    # canal registro: unreg vê, mas não fala
-                    ow_unreg = ow.get(unreg_role, discord.PermissionOverwrite())
-                    ow_unreg.view_channel = True
-                    if isinstance(ch, discord.TextChannel):
-                        ow_unreg.send_messages = False
-                        ow_unreg.read_message_history = True
+            if is_register:
+                # unreg vê mas não fala
+                ow_unreg = ow.get(unreg_role, discord.PermissionOverwrite())
+                ow_unreg.view_channel = True
+                if isinstance(ch, discord.TextChannel):
+                    ow_unreg.send_messages = False
+                    ow_unreg.read_message_history = True
+                ow[unreg_role] = ow_unreg
+
+                # everyone vê mas não fala
+                ow_every = ow.get(guild.default_role, discord.PermissionOverwrite())
+                ow_every.view_channel = True
+                if isinstance(ch, discord.TextChannel):
+                    ow_every.send_messages = False
+                    ow_every.read_message_history = True
+                ow[guild.default_role] = ow_every
+
+                # registrado vê e fala (texto)
+                ow_reg = ow.get(reg_role, discord.PermissionOverwrite())
+                ow_reg.view_channel = True
+                if isinstance(ch, discord.TextChannel):
+                    ow_reg.send_messages = True
+                    ow_reg.read_message_history = True
+                ow[reg_role] = ow_reg
+            else:
+                ow_unreg = ow.get(unreg_role, discord.PermissionOverwrite())
+                if ow_unreg.view_channel is not False:
+                    ow_unreg.view_channel = False
                     ow[unreg_role] = ow_unreg
 
-                    # @everyone vê mas não fala
-                    ow_every = ow.get(guild.default_role, discord.PermissionOverwrite())
-                    ow_every.view_channel = True
-                    if isinstance(ch, discord.TextChannel):
-                        ow_every.send_messages = False
-                        ow_every.read_message_history = True
-                    ow[guild.default_role] = ow_every
-
-                    # registrado vê e fala
-                    ow_reg = ow.get(reg_role, discord.PermissionOverwrite())
-                    ow_reg.view_channel = True
-                    if isinstance(ch, discord.TextChannel):
-                        ow_reg.send_messages = True
-                        ow_reg.read_message_history = True
-                    ow[reg_role] = ow_reg
-                else:
-                    # qualquer outro canal: unreg não vê
-                    ow_unreg = ow.get(unreg_role, discord.PermissionOverwrite())
-                    if ow_unreg.view_channel is not False:
-                        ow_unreg.view_channel = False
-                        ow[unreg_role] = ow_unreg
-
-                    # não mexo no @everyone e reg_role aqui para não quebrar sua estrutura geral
-
-                await ch.edit(overwrites=ow, reason="Enforce: visibility rules")
-                changed_channels += 1
-            except discord.Forbidden:
-                pass
+            await ch.edit(overwrites=ow, reason="Enforce: visibility rules")
+            changed_channels += 1
+        except discord.Forbidden:
+            pass
 
     return changed_categories, changed_channels
+
+
+# =========================
+# Registration UI
+# =========================
+
+class RegisterModal(discord.ui.Modal, title="Cadastro — Death Zone Online"):
+    game_name = discord.ui.TextInput(
+        label="Seu nome no jogo",
+        placeholder="Ex: Sam Cherri",
+        min_length=3,
+        max_length=32,
+        required=True,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        member = interaction.user
+        if guild is None or not isinstance(member, discord.Member):
+            return await interaction.response.send_message("Use dentro do servidor.", ephemeral=True)
+
+        reg_role = discord.utils.get(guild.roles, name=ROLE_REG)
+        unreg_role = discord.utils.get(guild.roles, name=ROLE_UNREG)
+        if not reg_role or not unreg_role:
+            return await interaction.response.send_message("Cargos base não existem. Rode /setup.", ephemeral=True)
+
+        # NICK = exatamente o nome do jogo (prefixo vazio)
+        new_nick = f"{NICK_PREFIX}{self.game_name.value}".strip()
+
+        try:
+            await member.edit(nick=new_nick, reason="Cadastro: set nickname")
+        except discord.Forbidden:
+            return await interaction.response.send_message(
+                "Não consegui mudar o apelido. Dê ao bot 'Gerenciar Apelidos' e coloque o cargo do bot acima dos outros.",
+                ephemeral=True,
+            )
+
+        try:
+            if unreg_role in member.roles:
+                await member.remove_roles(unreg_role, reason="Cadastro: remove unregistered")
+            if reg_role not in member.roles:
+                await member.add_roles(reg_role, reason="Cadastro: add registered")
+        except discord.Forbidden:
+            return await interaction.response.send_message(
+                "Não consegui mexer nos cargos. Dê ao bot 'Gerenciar Cargos' e coloque o cargo do bot acima.",
+                ephemeral=True,
+            )
+
+        await interaction.response.send_message(f"✅ Registrado. Seu nick agora é **{new_nick}**.", ephemeral=True)
+
+class RegisterView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Cadastrar", style=discord.ButtonStyle.success, emoji="✅", custom_id="register_button")
+    async def register_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(RegisterModal())
 
 
 # =========================
@@ -424,7 +414,6 @@ async def on_ready():
     except Exception as e:
         print(f"[WARN] sync falhou: {e}", flush=True)
 
-    # inicia auditoria periódica
     if not audit_members.is_running():
         audit_members.start()
 
@@ -438,7 +427,6 @@ async def on_member_join(member: discord.Member):
     if not unreg_role:
         return
 
-    # coloca Não Registrado em todo mundo que entra
     try:
         await member.add_roles(unreg_role, reason="Auto: force registration on join")
     except discord.Forbidden:
@@ -452,8 +440,7 @@ async def on_member_join(member: discord.Member):
             except discord.Forbidden:
                 pass
 
-
-@bot.tree.command(name="setup", description="Cria/sincroniza estrutura + força regras de registro (membros e visibilidade).")
+@bot.tree.command(name="setup", description="Cria/sincroniza estrutura e força cadastro (visibilidade + membros).")
 @app_commands.checks.has_permissions(administrator=True)
 async def setup_cmd(interaction: discord.Interaction):
     guild = interaction.guild
@@ -462,16 +449,16 @@ async def setup_cmd(interaction: discord.Interaction):
 
     await interaction.response.send_message("⏳ Setup: criando estrutura + aplicando regras...", ephemeral=True)
 
-    # 1) Cargos base e do config
+    # 1) Roles do config
     for rdef in build_role_defs(CONFIG):
         await ensure_role(guild, rdef)
 
-    # 2) Estrutura do config (categorias/canais)
     reg_role = discord.utils.get(guild.roles, name=ROLE_REG)
     unreg_role = discord.utils.get(guild.roles, name=ROLE_UNREG)
     if not reg_role or not unreg_role:
         return await interaction.followup.send("❌ Erro: cargos base não existem.", ephemeral=True)
 
+    # 2) Estrutura do config
     reg_channel: Optional[discord.TextChannel] = None
     for cdef in build_categories(CONFIG):
         cat = await ensure_category(guild, cdef.name)
@@ -483,7 +470,7 @@ async def setup_cmd(interaction: discord.Interaction):
                 if norm(tch.name) == norm(REGISTER_CHANNEL_NAME):
                     reg_channel = tch
 
-    # 3) Painel no canal registrar
+    # 3) Painel de cadastro
     if reg_channel:
         try:
             await reg_channel.send(
@@ -493,10 +480,10 @@ async def setup_cmd(interaction: discord.Interaction):
         except discord.Forbidden:
             pass
 
-    # 4) Aplicar regra “só registrar aparece para Não Registrado”
+    # 4) Forçar visibilidade (não registrado só vê registrar)
     cats_changed, ch_changed = await enforce_visibility_rules(guild)
 
-    # 5) Colocar “Não Registrado” em quem está sem cargo (servidor inteiro)
+    # 5) Forçar membros sem cargo => não registrado
     added, fixed = await enforce_unregistered_for_no_role_members(guild)
 
     await interaction.followup.send(
@@ -506,8 +493,7 @@ async def setup_cmd(interaction: discord.Interaction):
         ephemeral=True,
     )
 
-
-@bot.tree.command(name="verificar_registro", description="Mostra quantos membros ainda estão como Não Registrado e sem cargo.")
+@bot.tree.command(name="verificar_registro", description="Mostra quantos membros ainda estão como Não Registrado e quantos estão sem cargo.")
 @app_commands.checks.has_permissions(administrator=True)
 async def verificar_registro(interaction: discord.Interaction):
     guild = interaction.guild
@@ -519,7 +505,7 @@ async def verificar_registro(interaction: discord.Interaction):
         return await interaction.response.send_message("Cargo 'Não Registrado' não existe.", ephemeral=True)
 
     total_unreg = len(unreg_role.members)
-    sem_cargo = sum(1 for m in guild.members if (not m.bot) and is_member_without_roles(m))
+    sem_cargo = sum(1 for m in guild.members if is_member_without_roles(m))
 
     await interaction.response.send_message(
         f"⛔ Não Registrados (cargo): **{total_unreg}**\n"
@@ -527,8 +513,6 @@ async def verificar_registro(interaction: discord.Interaction):
         ephemeral=True,
     )
 
-
-# Auditoria periódica (corrige caso alguém mexa em cargos manualmente)
 @tasks.loop(minutes=AUDIT_INTERVAL_MIN)
 async def audit_members():
     for guild in bot.guilds:
@@ -536,9 +520,7 @@ async def audit_members():
             await enforce_unregistered_for_no_role_members(guild)
             await enforce_visibility_rules(guild)
         except Exception:
-            # não derruba o bot por auditoria
             pass
-
 
 def main():
     bot.run(DISCORD_TOKEN)
