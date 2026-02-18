@@ -1,61 +1,141 @@
-guild_name: "BrazilianArmy | Death Zone Online"
+sync:
+  aggressive_channels: true
+  aggressive_roles: true
+
+  # Se quiser proteger algo de ser deletado mesmo no agressivo:
+  preserve_categories: []
+  preserve_channels: []
+  preserve_roles: []
 
 registration:
-  channel_name: "📋-registrar-se"
   force_on_join: true
-  nickname_prefix: ""
+  category_name: "REGISTRO"
+  category_emoji: "📋"
+  channel_name: "registrar-se"
+  nickname_prefix: ""     # se quiser "Rec " depois você coloca
   unregistered_role_name: "⛔ Não Registrado"
   registered_role_name: "✅ Registrado"
   ping_on_join_in_channel: false
   audit_interval_min: 10
 
 roles:
-  - name: "✅ Registrado"
-    color: "#2ECC71"
+  # ranks (ordem do menor -> maior)
+  - name: "🪖 Recruta"
+    color: "#7A7A7A"
     hoist: true
-  - name: "⛔ Não Registrado"
-    color: "#E74C3C"
+  - name: "🪖 Soldado"
+    color: "#6B6B6B"
+    hoist: true
+  - name: "🪖 Cabo"
+    color: "#5C4033"
+    hoist: true
+
+  - name: "🎖️ Terceiro-Sargento"
+    color: "#8B5A2B"
+    hoist: true
+  - name: "🎖️ Segundo-Sargento"
+    color: "#8B4513"
+    hoist: true
+  - name: "🎖️ Primeiro-Sargento"
+    color: "#A0522D"
+    hoist: true
+  - name: "🎖️ Subtenente"
+    color: "#CD853F"
+    hoist: true
+
+  - name: "🟦 Aspirante"
+    color: "#4682B4"
+    hoist: true
+  - name: "🟦 Segundo-Tenente"
+    color: "#1E90FF"
+    hoist: true
+  - name: "🟦 Primeiro-Tenente"
+    color: "#104E8B"
+    hoist: true
+  - name: "🟦 Capitão"
+    color: "#27408B"
+    hoist: true
+
+  - name: "🟩 Major"
+    color: "#556B2F"
+    hoist: true
+  - name: "🟩 Tenente-Coronel"
+    color: "#006400"
+    hoist: true
+  - name: "🟩 Coronel"
+    color: "#013220"
+    hoist: true
+
+  - name: "⭐ General de Brigada"
+    color: "#B8860B"
+    hoist: true
+  - name: "⭐⭐ General de Divisão"
+    color: "#DAA520"
+    hoist: true
+  - name: "⭐⭐⭐ General de Exército"
+    color: "#FFD700"
+    hoist: true
+
+  # staff interno do clã
+  - name: "🧑‍🏫 Instrutor"
+    color: "#9B59B6"
     hoist: true
 
 categories:
-  - name: "REGISTRO"
-    emoji: "📋"
-    channels:
-      - name: "📋-registrar-se"
-        type: "text"
-        topic: "Clique em **Cadastrar** para liberar o servidor."
-
   - name: "COMUNIDADE"
     emoji: "💬"
     channels:
-      - name: "💬-chat-geral"
+      - name: "chat-geral"
         type: "text"
-        topic: "Chat geral."
-      - name: "📍-lobby"
+        topic: "Chat geral do clã."
+      - name: "lobby"
         type: "text"
-        topic: "Formação de dupla."
-      - name: "🔊-geral-voz"
+        topic: "Marcar duo / combinar horário."
+      - name: "geral-voz"
         type: "voice"
         user_limit: 0
 
   - name: "PARTIDAS (DUO)"
     emoji: "🎮"
     channels:
-      - name: "⏳-aguardando-duo"
+      - name: "aguardando-duo"
         type: "voice"
         user_limit: 0
-      - name: "🎯-duo-1"
+      - name: "duo-1"
         type: "voice"
         user_limit: 2
-      - name: "🎯-duo-2"
+      - name: "duo-2"
         type: "voice"
         user_limit: 2
-      - name: "🎯-duo-3"
+      - name: "duo-3"
         type: "voice"
         user_limit: 2
-      - name: "🎯-duo-4"
+      - name: "duo-4"
         type: "voice"
         user_limit: 2
-      - name: "🎯-duo-5"
+      - name: "duo-5"
         type: "voice"
         user_limit: 2
+
+  - name: "OUTROS"
+    emoji: "🧩"
+    channels:
+      - name: "clipes-e-momentos"
+        type: "text"
+        topic: "Clipes, prints e momentos do jogo."
+      - name: "off-topic"
+        type: "text"
+        topic: "Assuntos fora do jogo."
+      - name: "off-voz"
+        type: "voice"
+        user_limit: 0
+
+  - name: "INSTRUTORES"
+    emoji: "🧑‍🏫"
+    channels:
+      - name: "instrutores-chat"
+        type: "text"
+        topic: "Área de instrutores."
+      - name: "instrutores-voz"
+        type: "voice"
+        user_limit: 0
