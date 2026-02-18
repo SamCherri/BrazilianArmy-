@@ -1,60 +1,78 @@
 import os
-import re
-import asyncio
-from typing import Optional, Dict, List
+from dataclasses import dataclass
+from typing import Dict, List, Optional
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 import yaml
 
-
 # =========================
-# Config
+# Config utils
 # =========================
 
 def load_config(path: str = "config.yaml") -> dict:
     if not os.path.exists(path):
-        raise FileNotFoundError("Não achei config.yaml na raiz do projeto.")
+        raise FileNotFoundError(f"Não achei '{path}'. Coloque o config.yaml na raiz do projeto.")
     with open(path, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f) or {}
+        cfg = yaml.safe_load(f)
     if not isinstance(cfg, dict):
-        raise ValueError("config.yaml inválido (esperado um dict).")
+        raise ValueError("config.yaml inválido: precisa ser um YAML de mapa (dict).")
     return cfg
 
-
-def hex_to_color_int(hex_str: str) -> int:
+def hex_to_int_color(hex_str: str) -> int:
     s = (hex_str or "").strip()
     if s.startswith("#"):
         s = s[1:]
     if len(s) != 6:
-        raise ValueError(f"Cor inválida: {hex_str} (use #RRGGBB)")
+        raise ValueError(f"Cor inválida: '{hex_str}'. Use #RRGGBB")
     return int(s, 16)
-
 
 def norm(s: str) -> str:
     return (s or "").strip().lower()
 
+# =========================
+# Models
+# =========================
+
+@dataclass
+class RoleDef:
+    name: str
+    color: int
+    hoist: bool = False
+    mentionable: bool = False
+
+@dataclass
+class ChannelDef:
+    name: str
+    type: str  # text | voice
+    topic: Optional[str] = None
+    slowmode: int = 0
+    user_limit: int = 0
+
+@dataclass
+class CategoryDef:
+    name: str
+    emoji: str
+    channels: List[ChannelDef]
+
+# =========================
+# Load config
+# =========================
 
 CONFIG = load_config("config.yaml")
 
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")  # Railway Variables/Secrets
+REG_CFG = CONFIG.get("registration", {})
+REGISTER_CHANNEL_NAME = REG_CFG.get("channel_name", "📋-registrar-se")
+FORCE_ON_JOIN = bool(REG_CFG.get("force_on_join", True))
+NICK_PREFIX = str(REG_CFG.get("nickname_prefix", "") or "")
+ROLE_UNREG = str(REG_CFG.get("unregistered_role_name", "⛔ Não Registrado"))
+ROLE_REG = str(REG_CFG.get("registered_role_name", "✅ Registrado"))
+PING_ON_JOIN = bool(REG_CFG.get("ping_on_join_in_channel", False))
+
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN não configurado (Secrets/Variables).")
-
-GATE_ROLE_NAME = CONFIG.get("gate_role", {}).get("name", "📝 Não Registrado")
-GATE_ROLE_COLOR = hex_to_color_int(CONFIG.get("gate_role", {}).get("color", "#444444"))
-
-DEFAULT_ROLE_NAME = CONFIG.get("default_role", "🪖 Recruta")
-DEFAULT_ROLE_COLOR = hex_to_color_int(CONFIG.get("default_role_color", "#7A7A7A"))
-
-REG_CATEGORY_NAME = CONFIG.get("registration", {}).get("category_name", "📝 CADASTRO")
-REG_CHANNEL_NAME = CONFIG.get("registration", {}).get("channel_name", "registrar")
-
-NICK_PREFIX = CONFIG.get("registration", {}).get("nick_prefix", "Rec")  # "Rec"
-NICK_MAX_GAME_NAME = int(CONFIG.get("registration", {}).get("max_game_name", 24))
-
-STRUCTURE = CONFIG.get("structure", {})
 
 # =========================
 # Bot
@@ -66,347 +84,368 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-
 # =========================
-# Find helpers
-# =========================
-
-def find_role(guild: discord.Guild, name: str) -> Optional[discord.Role]:
-    n = norm(name)
-    for r in guild.roles:
-        if norm(r.name) == n:
-            return r
-    return None
-
-
-def find_category(guild: discord.Guild, name: str) -> Optional[discord.CategoryChannel]:
-    n = norm(name)
-    for c in guild.categories:
-        if norm(c.name) == n:
-            return c
-    return None
-
-
-def find_text_channel(guild: discord.Guild, name: str) -> Optional[discord.TextChannel]:
-    n = norm(name)
-    for ch in guild.text_channels:
-        if norm(ch.name) == n:
-            return ch
-    return None
-
-
-def is_admin(member: discord.Member) -> bool:
-    return bool(member.guild_permissions.administrator)
-
-
-# =========================
-# Core: Setup
+# Helpers: roles/channels
 # =========================
 
-async def ensure_roles(guild: discord.Guild) -> Dict[str, discord.Role]:
-    # Gate role
-    gate = find_role(guild, GATE_ROLE_NAME)
-    if gate is None:
-        gate = await guild.create_role(
-            name=GATE_ROLE_NAME,
-            colour=discord.Color(GATE_ROLE_COLOR),
-            hoist=True,
-            mentionable=False,
-            reason="Setup: gate role"
-        )
-    else:
-        try:
-            await gate.edit(colour=discord.Color(GATE_ROLE_COLOR), hoist=True, reason="Setup: gate role update")
-        except discord.Forbidden:
-            pass
+async def ensure_role(guild: discord.Guild, rdef: RoleDef) -> discord.Role:
+    existing = discord.utils.get(guild.roles, name=rdef.name)
+    color = discord.Color(rdef.color)
+    if existing:
+        # Atualiza se necessário
+        changed = False
+        if existing.color.value != color.value:
+            await existing.edit(color=color, reason="Sync config (color)")
+            changed = True
+        if existing.hoist != rdef.hoist:
+            await existing.edit(hoist=rdef.hoist, reason="Sync config (hoist)")
+            changed = True
+        if existing.mentionable != rdef.mentionable:
+            await existing.edit(mentionable=rdef.mentionable, reason="Sync config (mentionable)")
+            changed = True
+        return existing
 
-    # Default role
-    default = find_role(guild, DEFAULT_ROLE_NAME)
-    if default is None:
-        default = await guild.create_role(
-            name=DEFAULT_ROLE_NAME,
-            colour=discord.Color(DEFAULT_ROLE_COLOR),
-            hoist=True,
-            mentionable=False,
-            reason="Setup: default role"
-        )
-    else:
-        try:
-            await default.edit(colour=discord.Color(DEFAULT_ROLE_COLOR), hoist=True, reason="Setup: default role update")
-        except discord.Forbidden:
-            pass
+    return await guild.create_role(
+        name=rdef.name,
+        color=color,
+        hoist=rdef.hoist,
+        mentionable=rdef.mentionable,
+        reason="Setup (create role)",
+    )
 
-    return {"gate": gate, "default": default}
+async def ensure_category(guild: discord.Guild, name: str) -> discord.CategoryChannel:
+    cat = discord.utils.get(guild.categories, name=name)
+    if cat:
+        return cat
+    return await guild.create_category(name, reason="Setup (create category)")
 
+async def ensure_text_channel(
+    guild: discord.Guild,
+    category: discord.CategoryChannel,
+    name: str,
+    topic: Optional[str],
+    slowmode: int,
+    overwrites: Optional[dict] = None,
+) -> discord.TextChannel:
+    ch = discord.utils.get(category.text_channels, name=name)
+    if ch:
+        # Sync
+        updates = {}
+        if topic is not None and ch.topic != topic:
+            updates["topic"] = topic
+        if slowmode and ch.slowmode_delay != slowmode:
+            updates["slowmode_delay"] = slowmode
+        if overwrites is not None:
+            # substitui as permissões do canal (garante travas)
+            await ch.edit(overwrites=overwrites, reason="Sync config (overwrites)")
+        if updates:
+            await ch.edit(**updates, reason="Sync config (text channel)")
+        return ch
 
-def reg_channel_overwrites(guild: discord.Guild, gate_role: discord.Role) -> Dict[discord.abc.Snowflake, discord.PermissionOverwrite]:
-    # Canal de cadastro: todo mundo vê, mas só não-registrado fala.
-    ow = {
-        guild.default_role: discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True),
-        gate_role: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
-    }
-    return ow
+    return await guild.create_text_channel(
+        name=name,
+        category=category,
+        topic=topic,
+        slowmode_delay=slowmode,
+        overwrites=overwrites,
+        reason="Setup (create text channel)",
+    )
 
+async def ensure_voice_channel(
+    guild: discord.Guild,
+    category: discord.CategoryChannel,
+    name: str,
+    user_limit: int,
+    overwrites: Optional[dict] = None,
+) -> discord.VoiceChannel:
+    ch = discord.utils.get(category.voice_channels, name=name)
+    if ch:
+        updates = {}
+        if user_limit is not None and ch.user_limit != user_limit:
+            updates["user_limit"] = user_limit
+        if overwrites is not None:
+            await ch.edit(overwrites=overwrites, reason="Sync config (overwrites)")
+        if updates:
+            await ch.edit(**updates, reason="Sync config (voice channel)")
+        return ch
 
-def locked_category_overwrites(guild: discord.Guild, gate_role: discord.Role) -> Dict[discord.abc.Snowflake, discord.PermissionOverwrite]:
-    # Todas as outras categorias: gate NÃO vê. Registrados veem normalmente (@everyone).
-    ow = {
-        guild.default_role: discord.PermissionOverwrite(view_channel=True),
-        gate_role: discord.PermissionOverwrite(view_channel=False),
-    }
-    return ow
+    return await guild.create_voice_channel(
+        name=name,
+        category=category,
+        user_limit=user_limit or 0,
+        overwrites=overwrites,
+        reason="Setup (create voice channel)",
+    )
 
-
-async def ensure_registration_area(guild: discord.Guild, gate_role: discord.Role) -> discord.TextChannel:
-    cat = find_category(guild, REG_CATEGORY_NAME)
-    if cat is None:
-        cat = await guild.create_category(REG_CATEGORY_NAME, reason="Setup: registration category")
-
-    # categoria de cadastro: todo mundo vê (para achar), mas canal controla fala
-    try:
-        await cat.edit(overwrites={guild.default_role: discord.PermissionOverwrite(view_channel=True)}, reason="Setup: reg cat perms")
-    except discord.Forbidden:
-        pass
-
-    ch = None
-    for t in cat.text_channels:
-        if norm(t.name) == norm(REG_CHANNEL_NAME):
-            ch = t
-            break
-
-    if ch is None:
-        ch = await guild.create_text_channel(
-            REG_CHANNEL_NAME,
-            category=cat,
-            overwrites=reg_channel_overwrites(guild, gate_role),
-            topic="Faça seu cadastro com /registrar para liberar o servidor.",
-            reason="Setup: registration channel"
-        )
-    else:
-        try:
-            await ch.edit(
-                overwrites=reg_channel_overwrites(guild, gate_role),
-                topic="Faça seu cadastro com /registrar para liberar o servidor.",
-                reason="Setup: registration channel update"
+def build_role_defs(cfg: dict) -> List[RoleDef]:
+    out: List[RoleDef] = []
+    for r in (cfg.get("roles") or []):
+        out.append(
+            RoleDef(
+                name=r.get("name", "").strip(),
+                color=hex_to_int_color(r.get("color", "#95A5A6")),
+                hoist=bool(r.get("hoist", False)),
+                mentionable=bool(r.get("mentionable", False)),
             )
-        except discord.Forbidden:
-            pass
+        )
+    # garante que os cargos base existam mesmo se esquecerem no YAML
+    names = {x.name for x in out}
+    if ROLE_REG not in names:
+        out.append(RoleDef(name=ROLE_REG, color=hex_to_int_color("#2ECC71"), hoist=True))
+    if ROLE_UNREG not in names:
+        out.append(RoleDef(name=ROLE_UNREG, color=hex_to_int_color("#E74C3C"), hoist=True))
+    return out
 
-    return ch
+def build_categories(cfg: dict) -> List[CategoryDef]:
+    out: List[CategoryDef] = []
+    for c in (cfg.get("categories") or []):
+        channels: List[ChannelDef] = []
+        for ch in (c.get("channels") or []):
+            channels.append(
+                ChannelDef(
+                    name=ch.get("name", "").strip(),
+                    type=ch.get("type", "text").strip().lower(),
+                    topic=ch.get("topic"),
+                    slowmode=int(ch.get("slowmode", 0) or 0),
+                    user_limit=int(ch.get("user_limit", 0) or 0),
+                )
+            )
+        out.append(
+            CategoryDef(
+                name=f"{c.get('emoji', '📁')} {c.get('name', '').strip()}".strip(),
+                emoji=str(c.get("emoji", "📁")),
+                channels=channels,
+            )
+        )
+    return out
 
+def overwrites_for_registration(
+    guild: discord.Guild,
+    reg_role: discord.Role,
+    unreg_role: discord.Role,
+    is_registration_channel: bool,
+) -> dict:
+    everyone = guild.default_role
 
-async def ensure_basic_structure(guild: discord.Guild, gate_role: discord.Role) -> None:
-    """
-    Cria canais básicos do Death Zone Online e aplica permissão:
-    - Não registrado NÃO vê nada fora do cadastro.
-    """
-    categories: List[dict] = STRUCTURE.get("categories", [])
-    if not categories:
-        return
+    # base: travado para não registrados
+    ow = {
+        everyone: discord.PermissionOverwrite(view_channel=False),
+        unreg_role: discord.PermissionOverwrite(view_channel=False),
+        reg_role: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+    }
 
-    for cat_def in categories:
-        cat_name = str(cat_def.get("name", "")).strip()
-        if not cat_name:
-            continue
+    # Canal de registro: não-registrado pode VER e CLICAR no botão (enviar msg é opcional)
+    if is_registration_channel:
+        ow[everyone] = discord.PermissionOverwrite(view_channel=True, read_message_history=True, send_messages=False)
+        ow[unreg_role] = discord.PermissionOverwrite(view_channel=True, read_message_history=True, send_messages=False)
 
-        cat = find_category(guild, cat_name)
-        if cat is None:
-            cat = await guild.create_category(cat_name, reason="Setup: create category")
-
-        # bloqueia gate
-        try:
-            await cat.edit(overwrites=locked_category_overwrites(guild, gate_role), reason="Setup: lock gate role")
-        except discord.Forbidden:
-            pass
-
-        # channels
-        for ch_def in (cat_def.get("channels", []) or []):
-            ch_name = str(ch_def.get("name", "")).strip()
-            ch_type = str(ch_def.get("type", "text")).strip().lower()
-            if not ch_name:
-                continue
-
-            if ch_type == "text":
-                # cria se não existir
-                existing = None
-                for t in cat.text_channels:
-                    if norm(t.name) == norm(ch_name):
-                        existing = t
-                        break
-                if existing is None:
-                    await guild.create_text_channel(
-                        ch_name,
-                        category=cat,
-                        topic=ch_def.get("topic"),
-                        slowmode_delay=int(ch_def.get("slowmode", 0) or 0),
-                        reason="Setup: create text channel"
-                    )
-                else:
-                    try:
-                        await existing.edit(
-                            topic=ch_def.get("topic"),
-                            slowmode_delay=int(ch_def.get("slowmode", 0) or 0),
-                            reason="Setup: update text channel"
-                        )
-                    except discord.Forbidden:
-                        pass
-
-            elif ch_type == "voice":
-                existing = None
-                for v in cat.voice_channels:
-                    if norm(v.name) == norm(ch_name):
-                        existing = v
-                        break
-                user_limit = ch_def.get("user_limit")
-                user_limit = int(user_limit) if user_limit is not None else None
-
-                if existing is None:
-                    await guild.create_voice_channel(
-                        ch_name,
-                        category=cat,
-                        user_limit=user_limit,
-                        reason="Setup: create voice channel"
-                    )
-                else:
-                    try:
-                        await existing.edit(user_limit=user_limit, reason="Setup: update voice channel")
-                    except discord.Forbidden:
-                        pass
-
+    return ow
 
 # =========================
-# Registration / nickname
+# Registration UI
 # =========================
 
-def sanitize_game_name(name: str) -> str:
-    s = re.sub(r"\s+", " ", (name or "").strip())
-    s = s[:NICK_MAX_GAME_NAME]
-    return s
-
-
-def build_nickname(game_name: str) -> str:
-    gn = sanitize_game_name(game_name)
-    nick = f"{NICK_PREFIX} {gn}".strip()
-    return nick[:32]
-
-
-class RegistrationModal(discord.ui.Modal, title="Cadastro — Death Zone Online"):
+class RegisterModal(discord.ui.Modal, title="Cadastro Death Zone Online"):
     game_name = discord.ui.TextInput(
-        label="Nome no jogo",
+        label="Seu nome no jogo",
         placeholder="Ex: Sam Cherri",
+        min_length=3,
+        max_length=32,
         required=True,
-        max_length=32
     )
 
     async def on_submit(self, interaction: discord.Interaction):
-        if not interaction.guild or not isinstance(interaction.user, discord.Member):
-            return await interaction.response.send_message("Use isso dentro do servidor.", ephemeral=True)
-
         guild = interaction.guild
-        member: discord.Member = interaction.user
+        member = interaction.user
+        if guild is None or not isinstance(member, discord.Member):
+            return await interaction.response.send_message("Erro: guild/member inválido.", ephemeral=True)
 
-        gate = find_role(guild, GATE_ROLE_NAME)
-        default = find_role(guild, DEFAULT_ROLE_NAME)
+        reg_role = discord.utils.get(guild.roles, name=ROLE_REG)
+        unreg_role = discord.utils.get(guild.roles, name=ROLE_UNREG)
+        if not reg_role or not unreg_role:
+            return await interaction.response.send_message("Erro: cargos base não existem. Rode /setup.", ephemeral=True)
 
-        if not default:
-            return await interaction.response.send_message(f"Cargo base '{DEFAULT_ROLE_NAME}' não existe. Rode /setup.", ephemeral=True)
-
-        # dá cargo base (se não tiver)
-        if default not in member.roles:
-            try:
-                await member.add_roles(default, reason="Registration: assign default role")
-            except discord.Forbidden:
-                return await interaction.response.send_message("Sem permissão para dar cargo base (Manage Roles).", ephemeral=True)
-
-        # remove gate
-        if gate and gate in member.roles:
-            try:
-                await member.remove_roles(gate, reason="Registration: remove gate role")
-            except discord.Forbidden:
-                pass
-
-        # muda nick
-        nick = build_nickname(str(self.game_name.value))
+        # Troca apelido
+        new_nick = f"{NICK_PREFIX}{self.game_name.value}".strip()
         try:
-            await member.edit(nick=nick, reason="Registration: set nickname")
+            await member.edit(nick=new_nick, reason="Cadastro: set nickname")
         except discord.Forbidden:
+            # Sem permissão para alterar nick
             return await interaction.response.send_message(
-                "Cadastro ok, mas não consegui mudar seu apelido. Dê ao bot 'Manage Nicknames'.",
-                ephemeral=True
+                "Não consegui mudar seu apelido. Coloque o bot acima dos cargos e dê permissão de 'Gerenciar Apelidos'.",
+                ephemeral=True,
             )
 
-        await interaction.response.send_message(f"✅ Registrado. Seu apelido agora é **{nick}**.", ephemeral=True)
+        # Ajusta cargos
+        try:
+            if unreg_role in member.roles:
+                await member.remove_roles(unreg_role, reason="Cadastro: remove unregistered")
+            if reg_role not in member.roles:
+                await member.add_roles(reg_role, reason="Cadastro: add registered")
+        except discord.Forbidden:
+            return await interaction.response.send_message(
+                "Não consegui mexer nos seus cargos. O bot precisa de 'Gerenciar Cargos' e estar acima dos cargos.",
+                ephemeral=True,
+            )
 
+        await interaction.response.send_message(
+            f"✅ Registrado com sucesso. Seu nick agora é **{new_nick}**.",
+            ephemeral=True,
+        )
+
+class RegisterView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Cadastrar", style=discord.ButtonStyle.success, emoji="✅", custom_id="register_button")
+    async def register_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(RegisterModal())
 
 # =========================
-# Events / Commands
+# Commands
 # =========================
 
 @bot.event
 async def on_ready():
     try:
-        synced = await bot.tree.sync()
-        print(f"[OK] Online: {bot.user} | comandos: {len(synced)}", flush=True)
-    except Exception as e:
-        print(f"[WARN] Falha ao sync comandos: {e}", flush=True)
-
-
-@bot.event
-async def on_member_join(member: discord.Member):
-    # Força cadastro
-    guild = member.guild
-    gate = find_role(guild, GATE_ROLE_NAME)
-    if not gate:
-        return
-
-    try:
-        await member.add_roles(gate, reason="Gate: must register")
-    except discord.Forbidden:
-        return
-
-    # tenta DM
-    try:
-        await member.send(
-            "Bem-vindo ao servidor.\n"
-            "Para liberar acesso, faça o cadastro:\n"
-            f"1) Vá no canal **#{REG_CHANNEL_NAME}**\n"
-            "2) Use **/registrar** e informe seu nome no jogo.\n"
-        )
+        bot.add_view(RegisterView())
     except Exception:
         pass
 
-
-@bot.tree.command(name="setup", description="Cria/ajusta estrutura básica do Death Zone Online e força cadastro.")
-async def setup_cmd(interaction: discord.Interaction):
-    if not interaction.guild or not isinstance(interaction.user, discord.Member):
-        return await interaction.response.send_message("Use isso dentro do servidor.", ephemeral=True)
-    if not is_admin(interaction.user):
-        return await interaction.response.send_message("Apenas Administrador pode usar /setup.", ephemeral=True)
-
-    await interaction.response.defer(ephemeral=True, thinking=True)
-
     try:
-        roles = await ensure_roles(interaction.guild)
-        await ensure_registration_area(interaction.guild, roles["gate"])
-        await ensure_basic_structure(interaction.guild, roles["gate"])
-    except discord.Forbidden:
-        return await interaction.followup.send("❌ Sem permissões (Manage Roles / Manage Channels / Manage Nicknames).", ephemeral=True)
+        synced = await bot.tree.sync()
+        print(f"[OK] Online: {bot.user} | comandos: {len(synced)}", flush=True)
     except Exception as e:
-        return await interaction.followup.send(f"❌ Erro no setup: {e}", ephemeral=True)
+        print(f"[WARN] sync falhou: {e}", flush=True)
 
-    await interaction.followup.send("✅ Setup concluído. Cadastro obrigatório ativo.", ephemeral=True)
+@bot.tree.command(name="setup", description="Cria/sincroniza estrutura de canais/cargos e posta o painel de cadastro.")
+@app_commands.checks.has_permissions(administrator=True)
+async def setup_cmd(interaction: discord.Interaction):
+    guild = interaction.guild
+    if guild is None:
+        return await interaction.response.send_message("Use isso dentro de um servidor.", ephemeral=True)
 
+    await interaction.response.send_message("⏳ Criando/sincronizando estrutura...", ephemeral=True)
 
-@bot.tree.command(name="registrar", description="Cadastro obrigatório: define seu nome no jogo e libera o servidor.")
-async def registrar_cmd(interaction: discord.Interaction):
-    if not interaction.guild or not isinstance(interaction.user, discord.Member):
-        return await interaction.response.send_message("Use isso dentro do servidor.", ephemeral=True)
-    await interaction.response.send_modal(RegistrationModal())
+    # 1) Roles
+    role_defs = build_role_defs(CONFIG)
+    for rdef in role_defs:
+        if not rdef.name:
+            continue
+        await ensure_role(guild, rdef)
 
+    reg_role = discord.utils.get(guild.roles, name=ROLE_REG)
+    unreg_role = discord.utils.get(guild.roles, name=ROLE_UNREG)
+    if not reg_role or not unreg_role:
+        return await interaction.followup.send("Erro: não consegui criar cargos base.", ephemeral=True)
+
+    # 2) Categories/Channels + permissions
+    categories = build_categories(CONFIG)
+    created_reg_channel: Optional[discord.TextChannel] = None
+
+    for cdef in categories:
+        cat = await ensure_category(guild, cdef.name)
+
+        for ch in cdef.channels:
+            is_reg = (norm(ch.name) == norm(REGISTER_CHANNEL_NAME))
+            overwrites = overwrites_for_registration(guild, reg_role, unreg_role, is_registration_channel=is_reg)
+
+            if ch.type == "voice":
+                vch = await ensure_voice_channel(
+                    guild=guild,
+                    category=cat,
+                    name=ch.name,
+                    user_limit=ch.user_limit or 0,
+                    overwrites=overwrites,
+                )
+            else:
+                tch = await ensure_text_channel(
+                    guild=guild,
+                    category=cat,
+                    name=ch.name,
+                    topic=ch.topic,
+                    slowmode=ch.slowmode or 0,
+                    overwrites=overwrites,
+                )
+                if is_reg:
+                    created_reg_channel = tch
+
+    # 3) Post registration panel
+    if created_reg_channel:
+        try:
+            await created_reg_channel.send(
+                "📋 **REGISTRO OBRIGATÓRIO**\n\nClique no botão abaixo para se cadastrar e liberar o servidor.",
+                view=RegisterView(),
+            )
+        except discord.Forbidden:
+            pass
+
+    await interaction.followup.send("✅ Setup concluído.", ephemeral=True)
+
+@setup_cmd.error
+async def setup_error(interaction: discord.Interaction, error: Exception):
+    await interaction.response.send_message(f"❌ Erro no setup: {error}", ephemeral=True)
+
+# =========================
+# Force registration on join
+# =========================
+
+@bot.event
+async def on_member_join(member: discord.Member):
+    if not FORCE_ON_JOIN:
+        return
+
+    guild = member.guild
+    unreg_role = discord.utils.get(guild.roles, name=ROLE_UNREG)
+    reg_role = discord.utils.get(guild.roles, name=ROLE_REG)
+
+    if not unreg_role or not reg_role:
+        return
+
+    # Se já tem registrado, não mexe
+    if reg_role in member.roles:
+        return
+
+    # Aplica Não Registrado
+    try:
+        if unreg_role not in member.roles:
+            await member.add_roles(unreg_role, reason="Auto: force registration")
+    except discord.Forbidden:
+        return
+
+    # Opcional: avisar no canal de registro
+    if PING_ON_JOIN:
+        reg_channel = discord.utils.get(guild.text_channels, name=REGISTER_CHANNEL_NAME)
+        if reg_channel:
+            try:
+                await reg_channel.send(f"{member.mention} faça seu cadastro clicando em **Cadastrar**.")
+            except discord.Forbidden:
+                pass
+
+# =========================
+# Anti-bypass: verifica quem não cadastrou (comando admin)
+# =========================
+
+@bot.tree.command(name="verificar_registro", description="Lista quantos membros ainda estão como Não Registrado.")
+@app_commands.checks.has_permissions(administrator=True)
+async def verificar_registro(interaction: discord.Interaction):
+    guild = interaction.guild
+    if guild is None:
+        return await interaction.response.send_message("Use dentro do servidor.", ephemeral=True)
+
+    unreg_role = discord.utils.get(guild.roles, name=ROLE_UNREG)
+    if not unreg_role:
+        return await interaction.response.send_message("Cargo 'Não Registrado' não existe.", ephemeral=True)
+
+    count = len(unreg_role.members)
+    await interaction.response.send_message(f"⛔ Não Registrados: **{count}**", ephemeral=True)
+
+# =========================
+# Run
+# =========================
 
 def main():
     bot.run(DISCORD_TOKEN)
-
 
 if __name__ == "__main__":
     main()
