@@ -6,8 +6,6 @@ clan:
 sync:
   aggressive_channels: true
   aggressive_roles: true
-
-  # Se quiser proteger algo de ser deletado mesmo no agressivo:
   preserve_categories: []
   preserve_channels: []
   preserve_roles: []
@@ -17,27 +15,27 @@ registration:
   category_name: "ENTRADA"
   category_emoji: "🧟"
   channel_name: "entrada"
+
   nickname_prefix: ""   # se vazio, usa "[BZC] Nome"
   unregistered_role_name: "⛔ Pendente"
   registered_role_name: "✅ Membro"
-  ping_on_join_in_channel: false
-  audit_interval_min: 10 
 
-  # NOVO: se true, todo membro sem ✅ Membro vira ⛔ Pendente (mesmo que tenha outros cargos), salvo bypass_roles.
+  ping_on_join_in_channel: false
+  audit_interval_min: 10
+
   require_registered_role: true
   bypass_roles:
-    - "🛠️ Staff"
+    - "🛡️ Moderação"
 
 roles:
-  - name: "🛠️ Staff"
+  - name: "🛡️ Moderação"
     color: "#F1C40F"
     hoist: true
 
-  # O bot SEMPRE garante ⛔ Pendente e ✅ Membro mesmo se você não listar aqui.
-  # Se quiser listar, pode — não muda nada.
   - name: "✅ Membro"
     color: "#2ECC71"
     hoist: true
+
   - name: "⛔ Pendente"
     color: "#E74C3C"
     hoist: true
@@ -51,7 +49,7 @@ categories:
         topic: "Regras do clã e do servidor."
       - name: "avisos"
         type: "text"
-        topic: "Avisos e novidades do clã."
+        topic: "Avisos importantes."
 
   - name: "GERAL"
     emoji: "💬"
@@ -66,7 +64,7 @@ categories:
         type: "voice"
         user_limit: 0
 
-  - name: "PARTIDAS DUO"
+  - name: "PARTIDAS (DUO)"
     emoji: "🎮"
     channels:
       - name: "duo-1"
