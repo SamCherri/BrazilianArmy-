@@ -90,10 +90,28 @@ ROLE_PENDING = str(REG_CFG.get("unregistered_role_name", "⛔ Pendente")).strip(
 ROLE_MEMBER = str(REG_CFG.get("registered_role_name", "✅ Membro")).strip()
 
 REQUIRE_MEMBER_ROLE = bool(REG_CFG.get("require_registered_role", True))
-BYPASS_ROLES = set((REG_CFG.get("bypass_roles") or []))
+BYPASS_ROLES = set((REG_CFG.get("bypass_roles") or []))  # staff
 
-# mantém como estava: prefixo opcional
+# mantém como estava: prefixo opcional (mas você não quer TAG, então se vazio -> nick = ign)
 NICK_PREFIX = str(REG_CFG.get("nickname_prefix", "") or "").strip()
+
+UI_CFG = CONFIG.get("ui", {}) or {}
+WELCOME_CATEGORY_RAW = str(UI_CFG.get("welcome_category_name", "GERAL")).strip()
+WELCOME_CHANNEL_NAME = str(UI_CFG.get("welcome_channel_name", "boas-vindas")).strip()
+
+LOGS_CATEGORY_RAW = str(UI_CFG.get("logs_category_name", "STAFF")).strip()
+LOGS_CATEGORY_EMOJI = str(UI_CFG.get("logs_category_emoji", "🛠")).strip()
+LOGS_CHANNEL_NAME = str(UI_CFG.get("logs_channel_name", "logs")).strip()
+
+READ_ONLY_CATEGORY_RAW = str(UI_CFG.get("read_only_category_name", "AVISOS")).strip()
+READ_ONLY_CHANNELS = set((UI_CFG.get("read_only_channels") or ["regras", "avisos"]))
+
+SLOWMODE_OVERRIDES: Dict[str, int] = {}
+for k, v in (UI_CFG.get("slowmodes") or {}).items():
+    try:
+        SLOWMODE_OVERRIDES[str(k).strip()] = int(v)
+    except Exception:
+        pass
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
 if not DISCORD_TOKEN:
@@ -109,6 +127,28 @@ intents.guilds = True
 intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+
+# =========================
+# Helpers
+# =========================
+
+def get_staff_roles(guild: discord.Guild) -> List[discord.Role]:
+    if not BYPASS_ROLES:
+        r = discord.utils.get(guild.roles, name="🛡️ Moderação")
+        return [r] if r else []
+    roles = []
+    for name in BYPASS_ROLES:
+        r = discord.utils.get(guild.roles, name=name)
+        if r:
+            roles.append(r)
+    return roles
+
+def slowmode_for_channel(name: str, default: int) -> int:
+    n = str(name).strip()
+    if n in SLOWMODE_OVERRIDES:
+        return int(SLOWMODE_OVERRIDES[n] or 0)
+    return int(default or 0)
 
 
 # =========================
@@ -130,7 +170,6 @@ def build_role_defs(cfg: dict) -> List[RoleDef]:
             )
         )
 
-    # garante cargos base do fluxo
     names = {x.name for x in out}
     if ROLE_MEMBER not in names:
         out.append(RoleDef(name=ROLE_MEMBER, color=hex_to_int_color("#2ECC71"), hoist=True))
@@ -142,7 +181,7 @@ def build_role_defs(cfg: dict) -> List[RoleDef]:
 def build_categories(cfg: dict) -> List[CategoryDef]:
     out: List[CategoryDef] = []
 
-    # categoria de entrada sempre existe (primeira)
+    # ENTRADA sempre existe
     entry_channels = [
         ChannelDef(
             name=ENTRY_CHANNEL_NAME,
@@ -161,6 +200,7 @@ def build_categories(cfg: dict) -> List[CategoryDef]:
         )
     )
 
+    # categorias do config
     for c in (cfg.get("categories") or []):
         raw = str(c.get("name", "")).strip()
         if not raw:
@@ -189,14 +229,58 @@ def build_categories(cfg: dict) -> List[CategoryDef]:
                 )
             )
 
+        out.append(CategoryDef(name=display, raw_name=raw, emoji=emoji, channels=channels))
+
+    # (Premium) Garantir canal de boas-vindas dentro de uma categoria definida (padrão: GERAL)
+    # Só adiciona se a categoria existir no config.
+    for c in out:
+        if norm(c.raw_name) == norm(WELCOME_CATEGORY_RAW):
+            if all(norm(ch.name) != norm(WELCOME_CHANNEL_NAME) for ch in c.channels):
+                c.channels.append(
+                    ChannelDef(
+                        name=WELCOME_CHANNEL_NAME,
+                        type="text",
+                        topic="Boas-vindas e informações rápidas.",
+                        slowmode=0,
+                        user_limit=0,
+                    )
+                )
+            break
+
+    # (Premium) Garantir categoria/canal de logs (STAFF)
+    # Se já existir no config, só reaproveita.
+    exists_logs_cat = any(norm(c.raw_name) == norm(LOGS_CATEGORY_RAW) for c in out)
+    if not exists_logs_cat:
         out.append(
             CategoryDef(
-                name=display,
-                raw_name=raw,
-                emoji=emoji,
-                channels=channels,
+                name=f"{LOGS_CATEGORY_EMOJI} {LOGS_CATEGORY_RAW}".strip(),
+                raw_name=LOGS_CATEGORY_RAW,
+                emoji=LOGS_CATEGORY_EMOJI,
+                channels=[
+                    ChannelDef(
+                        name=LOGS_CHANNEL_NAME,
+                        type="text",
+                        topic="Logs internos (setup/registro).",
+                        slowmode=0,
+                        user_limit=0,
+                    )
+                ],
             )
         )
+    else:
+        for c in out:
+            if norm(c.raw_name) == norm(LOGS_CATEGORY_RAW):
+                if all(norm(ch.name) != norm(LOGS_CHANNEL_NAME) for ch in c.channels):
+                    c.channels.append(
+                        ChannelDef(
+                            name=LOGS_CHANNEL_NAME,
+                            type="text",
+                            topic="Logs internos (setup/registro).",
+                            slowmode=0,
+                            user_limit=0,
+                        )
+                    )
+                break
 
     return out
 
@@ -217,12 +301,7 @@ async def ensure_role(guild: discord.Guild, rdef: RoleDef) -> discord.Role:
                 or existing.mentionable != rdef.mentionable
             )
             if changed:
-                await existing.edit(
-                    color=color,
-                    hoist=rdef.hoist,
-                    mentionable=rdef.mentionable,
-                    reason="Sync role",
-                )
+                await existing.edit(color=color, hoist=rdef.hoist, mentionable=rdef.mentionable, reason="Sync role")
         except discord.Forbidden:
             pass
         return existing
@@ -249,11 +328,13 @@ async def ensure_text_channel(
     slowmode: int,
 ) -> discord.TextChannel:
     ch = discord.utils.get(category.text_channels, name=name)
+    desired_slowmode = slowmode_for_channel(name, slowmode)
+
     if ch:
         try:
-            changed = (ch.topic != topic) or (ch.slowmode_delay != (slowmode or 0))
+            changed = (ch.topic != topic) or (ch.slowmode_delay != (desired_slowmode or 0))
             if changed:
-                await ch.edit(topic=topic, slowmode_delay=slowmode or 0, reason="Sync text")
+                await ch.edit(topic=topic, slowmode_delay=desired_slowmode or 0, reason="Sync text")
         except discord.Forbidden:
             pass
         return ch
@@ -262,7 +343,7 @@ async def ensure_text_channel(
         name=name,
         category=category,
         topic=topic,
-        slowmode_delay=slowmode or 0,
+        slowmode_delay=desired_slowmode or 0,
         reason="Create text",
     )
 
@@ -299,12 +380,6 @@ def has_any_bypass_role(member: discord.Member) -> bool:
     return any(r.name in BYPASS_ROLES for r in member.roles)
 
 async def ensure_entry_channel_visibility(guild: discord.Guild, entry_channel: discord.TextChannel) -> int:
-    """
-    Canal de entrada:
-      - @everyone: vê, mas não fala
-      - Pendente: vê, mas não fala
-      - Membro: vê e fala
-    """
     role_member = discord.utils.get(guild.roles, name=ROLE_MEMBER)
     role_pending = discord.utils.get(guild.roles, name=ROLE_PENDING)
     if not role_member or not role_pending:
@@ -316,7 +391,7 @@ async def ensure_entry_channel_visibility(guild: discord.Guild, entry_channel: d
     def get_ow(target):
         return ow.get(target, discord.PermissionOverwrite())
 
-    # @everyone
+    # @everyone: vê, não fala
     o = get_ow(guild.default_role)
     if o.view_channel is not True:
         o.view_channel = True; changed = True
@@ -326,7 +401,7 @@ async def ensure_entry_channel_visibility(guild: discord.Guild, entry_channel: d
         o.read_message_history = True; changed = True
     ow[guild.default_role] = o
 
-    # pending
+    # pending: vê, não fala
     o = get_ow(role_pending)
     if o.view_channel is not True:
         o.view_channel = True; changed = True
@@ -336,7 +411,7 @@ async def ensure_entry_channel_visibility(guild: discord.Guild, entry_channel: d
         o.read_message_history = True; changed = True
     ow[role_pending] = o
 
-    # member
+    # member: vê e fala
     o = get_ow(role_member)
     if o.view_channel is not True:
         o.view_channel = True; changed = True
@@ -355,12 +430,6 @@ async def ensure_entry_channel_visibility(guild: discord.Guild, entry_channel: d
     return 0
 
 async def ensure_category_lockdown(guild: discord.Guild, category: discord.CategoryChannel) -> int:
-    """
-    Para TODAS as categorias (exceto ENTRADA):
-      - @everyone: não vê
-      - Membro: vê
-      - Pendente: não vê
-    """
     role_member = discord.utils.get(guild.roles, name=ROLE_MEMBER)
     role_pending = discord.utils.get(guild.roles, name=ROLE_PENDING)
     if not role_member or not role_pending:
@@ -372,16 +441,19 @@ async def ensure_category_lockdown(guild: discord.Guild, category: discord.Categ
     def get_ow(target):
         return ow.get(target, discord.PermissionOverwrite())
 
+    # @everyone: não vê
     o = get_ow(guild.default_role)
     if o.view_channel is not False:
         o.view_channel = False; changed = True
     ow[guild.default_role] = o
 
+    # member: vê
     o = get_ow(role_member)
     if o.view_channel is not True:
         o.view_channel = True; changed = True
     ow[role_member] = o
 
+    # pending: não vê
     o = get_ow(role_pending)
     if o.view_channel is not False:
         o.view_channel = False; changed = True
@@ -395,24 +467,15 @@ async def ensure_category_lockdown(guild: discord.Guild, category: discord.Categ
             return 0
     return 0
 
-# === (ALTERAÇÃO 1) garantir que ⛔ Pendente não escreva em NENHUM texto ===
-async def ensure_pending_cannot_write_any_text(guild: discord.Guild, entry_channel: Optional[discord.TextChannel]) -> int:
-    """
-    Aplica overwrite direto nos TextChannels para o cargo Pendente:
-      - send_messages = False
-    Isso cobre caso exista algum canal visível por @everyone ou outras exceções.
-    """
+async def ensure_pending_cannot_write_any_text(guild: discord.Guild) -> int:
     role_pending = discord.utils.get(guild.roles, name=ROLE_PENDING)
     if not role_pending:
         return 0
 
     changed_count = 0
-
     for ch in guild.text_channels:
-        # entry já é tratado em ensure_entry_channel_visibility, mas manter coerente não faz mal
         ow = ch.overwrites
         o = ow.get(role_pending, discord.PermissionOverwrite())
-
         if o.send_messages is not False:
             o.send_messages = False
             ow[role_pending] = o
@@ -421,8 +484,113 @@ async def ensure_pending_cannot_write_any_text(guild: discord.Guild, entry_chann
                 changed_count += 1
             except discord.Forbidden:
                 pass
-
     return changed_count
+
+async def ensure_read_only_channels(guild: discord.Guild, cats: List[CategoryDef]) -> int:
+    """
+    Premium:
+      - Canais em READ_ONLY_CHANNELS (dentro da categoria READ_ONLY_CATEGORY_RAW):
+        * ✅ Membro: não escreve
+        * Staff: escreve
+        * ⛔ Pendente: não escreve (já garantido também)
+    """
+    role_member = discord.utils.get(guild.roles, name=ROLE_MEMBER)
+    role_pending = discord.utils.get(guild.roles, name=ROLE_PENDING)
+    staff_roles = get_staff_roles(guild)
+    if not role_member or not role_pending:
+        return 0
+
+    # achar nome display da categoria de avisos (com emoji)
+    target_display = None
+    for c in cats:
+        if norm(c.raw_name) == norm(READ_ONLY_CATEGORY_RAW):
+            target_display = c.name
+            break
+    if not target_display:
+        return 0
+
+    cat = discord.utils.get(guild.categories, name=target_display)
+    if not cat:
+        return 0
+
+    changed = 0
+    for ch in cat.text_channels:
+        if norm(ch.name) not in {norm(x) for x in READ_ONLY_CHANNELS}:
+            continue
+
+        ow = ch.overwrites
+        # membro: pode ver (por lockdown da categoria), mas não escreve
+        o = ow.get(role_member, discord.PermissionOverwrite())
+        if o.send_messages is not False:
+            o.send_messages = False
+            ow[role_member] = o
+
+        # pendente: nunca escreve
+        o = ow.get(role_pending, discord.PermissionOverwrite())
+        if o.send_messages is not False:
+            o.send_messages = False
+            ow[role_pending] = o
+
+        # staff: pode escrever
+        for sr in staff_roles:
+            o = ow.get(sr, discord.PermissionOverwrite())
+            if o.send_messages is not True:
+                o.send_messages = True
+                ow[sr] = o
+
+        try:
+            await ch.edit(overwrites=ow, reason="Premium: read-only channel policy")
+            changed += 1
+        except discord.Forbidden:
+            pass
+
+    return changed
+
+async def ensure_logs_privacy(guild: discord.Guild) -> int:
+    """
+    Premium: logs só para staff.
+    """
+    staff_roles = get_staff_roles(guild)
+    if not staff_roles:
+        return 0
+
+    # achar categoria display dos logs
+    display = f"{LOGS_CATEGORY_EMOJI} {LOGS_CATEGORY_RAW}".strip()
+    cat = discord.utils.get(guild.categories, name=display)
+    if not cat:
+        return 0
+
+    ch = discord.utils.get(cat.text_channels, name=LOGS_CHANNEL_NAME)
+    if not ch:
+        return 0
+
+    ow = ch.overwrites
+    changed = False
+
+    # bloqueia @everyone
+    o = ow.get(guild.default_role, discord.PermissionOverwrite())
+    if o.view_channel is not False:
+        o.view_channel = False; changed = True
+    ow[guild.default_role] = o
+
+    # libera staff
+    for sr in staff_roles:
+        o = ow.get(sr, discord.PermissionOverwrite())
+        if o.view_channel is not True:
+            o.view_channel = True; changed = True
+        if o.send_messages is not True:
+            o.send_messages = True; changed = True
+        if o.read_message_history is not True:
+            o.read_message_history = True; changed = True
+        ow[sr] = o
+
+    if changed:
+        try:
+            await ch.edit(overwrites=ow, reason="Premium: logs privacy")
+            return 1
+        except discord.Forbidden:
+            return 0
+    return 0
 
 
 # =========================
@@ -635,11 +803,65 @@ async def enforce_membership(guild: discord.Guild) -> Tuple[int, int, int, int]:
 
 
 # =========================
+# Premium UI (embed + logs)
+# =========================
+
+def build_entry_embed() -> discord.Embed:
+    emb = discord.Embed(
+        title=f"Entrada — {CLAN_NAME}",
+        description="Libere o acesso para ver os canais do clã.",
+    )
+    emb.add_field(name="Como entrar", value="Clique em **Liberar acesso** e informe seu nome no jogo.", inline=False)
+    emb.add_field(name="Depois do acesso", value="Vá no chat e no LFG para achar dupla.", inline=False)
+    emb.set_footer(text=f"{GAME_NAME}")
+    return emb
+
+async def find_logs_channel(guild: discord.Guild) -> Optional[discord.TextChannel]:
+    display = f"{LOGS_CATEGORY_EMOJI} {LOGS_CATEGORY_RAW}".strip()
+    cat = discord.utils.get(guild.categories, name=display)
+    if not cat:
+        return None
+    return discord.utils.get(cat.text_channels, name=LOGS_CHANNEL_NAME)
+
+async def log_event(guild: discord.Guild, text: str):
+    ch = await find_logs_channel(guild)
+    if not ch:
+        return
+    try:
+        await ch.send(text)
+    except discord.Forbidden:
+        pass
+
+async def send_welcome(guild: discord.Guild, member: discord.Member):
+    # achar categoria display do welcome
+    cats = build_categories(CONFIG)
+    target_display = None
+    for c in cats:
+        if norm(c.raw_name) == norm(WELCOME_CATEGORY_RAW):
+            target_display = c.name
+            break
+    if not target_display:
+        return
+
+    cat = discord.utils.get(guild.categories, name=target_display)
+    if not cat:
+        return
+
+    ch = discord.utils.get(cat.text_channels, name=WELCOME_CHANNEL_NAME)
+    if not ch:
+        return
+
+    try:
+        await ch.send(f"✅ {member.mention} entrou no clã. Bem-vindo.")
+    except discord.Forbidden:
+        pass
+
+
+# =========================
 # Registration UI
 # =========================
 
 class EntryModal(discord.ui.Modal, title="Liberar acesso"):
-    # (ALTERAÇÃO 2) removeu campo plataforma
     game_name = discord.ui.TextInput(
         label="Seu nome no jogo",
         placeholder="Ex: SamCherri",
@@ -661,11 +883,8 @@ class EntryModal(discord.ui.Modal, title="Liberar acesso"):
 
         ign = self.game_name.value.strip()
 
-        # (ALTERAÇÃO 3) removeu TAG [BZ...] do nickname
-        if NICK_PREFIX:
-            new_nick = f"{NICK_PREFIX}{ign}".strip()
-        else:
-            new_nick = ign
+        # sem TAG; se tiver prefixo configurado, usa prefixo; senão, nick = ign
+        new_nick = f"{NICK_PREFIX}{ign}".strip() if NICK_PREFIX else ign
 
         try:
             await member.edit(nick=new_nick, reason="Entry: set nickname")
@@ -686,10 +905,11 @@ class EntryModal(discord.ui.Modal, title="Liberar acesso"):
                 ephemeral=True,
             )
 
-        await interaction.response.send_message(
-            f"✅ Acesso liberado.\nSeu nick agora é **{new_nick}**.",
-            ephemeral=True
-        )
+        await interaction.response.send_message("✅ Acesso liberado.", ephemeral=True)
+
+        # premium: boas-vindas + log
+        await send_welcome(guild, member)
+        await log_event(guild, f"🧾 Registro: {member} -> nick '{new_nick}'")
 
 class EntryView(discord.ui.View):
     def __init__(self):
@@ -747,7 +967,32 @@ async def on_member_join(member: discord.Member):
                 pass
 
 
-@bot.tree.command(name="setup", description="AGRESSIVO: aplica o config e apaga tudo que não estiver nele. Também verifica membros sem acesso.")
+@bot.tree.command(name="recriar_painel", description="Recria o painel de entrada (embed + botão).")
+@app_commands.checks.has_permissions(administrator=True)
+async def recriar_painel(interaction: discord.Interaction):
+    guild = interaction.guild
+    if guild is None:
+        return await interaction.response.send_message("Use dentro de um servidor.", ephemeral=True)
+
+    # achar canal de entrada
+    entry_cat_name = f"{ENTRY_CATEGORY_EMOJI} {ENTRY_CATEGORY_NAME}".strip()
+    cat = discord.utils.get(guild.categories, name=entry_cat_name)
+    if not cat:
+        return await interaction.response.send_message("Categoria de entrada não existe. Rode /setup.", ephemeral=True)
+
+    ch = discord.utils.get(cat.text_channels, name=ENTRY_CHANNEL_NAME)
+    if not ch:
+        return await interaction.response.send_message("Canal de entrada não existe. Rode /setup.", ephemeral=True)
+
+    try:
+        await ch.send(embed=build_entry_embed(), view=EntryView())
+        await log_event(guild, f"🧾 Painel recriado por: {interaction.user}")
+        return await interaction.response.send_message("✅ Painel recriado.", ephemeral=True)
+    except discord.Forbidden:
+        return await interaction.response.send_message("Sem permissão para enviar mensagem no canal de entrada.", ephemeral=True)
+
+
+@bot.tree.command(name="setup", description="AGRESSIVO: aplica o config, apaga extras e força registro para liberar canais.")
 @app_commands.checks.has_permissions(administrator=True)
 async def setup_cmd(interaction: discord.Interaction):
     guild = interaction.guild
@@ -762,16 +1007,17 @@ async def setup_cmd(interaction: discord.Interaction):
     cats = build_categories(CONFIG)
     role_defs = build_role_defs(CONFIG)
 
-    # 1) roles
+    # 1) roles (agressivo)
     ru, rdel, rskip = await sync_roles_aggressive(guild, role_defs)
 
-    # 2) cria/ajusta categorias/canais
+    # 2) estrutura (categorias/canais)
     entry_channel: Optional[discord.TextChannel] = None
 
     for cdef in cats:
         cat = await ensure_category(guild, cdef.name)
 
-        if norm(cdef.raw_name) != norm(ENTRY_CATEGORY_NAME):
+        # lockdown em tudo fora entrada e fora staff (logs)
+        if norm(cdef.raw_name) not in {norm(ENTRY_CATEGORY_NAME), norm(LOGS_CATEGORY_RAW)}:
             await ensure_category_lockdown(guild, cat)
 
         for chdef in cdef.channels:
@@ -782,23 +1028,17 @@ async def setup_cmd(interaction: discord.Interaction):
                 if norm(tch.name) == norm(ENTRY_CHANNEL_NAME) and norm(cdef.raw_name) == norm(ENTRY_CATEGORY_NAME):
                     entry_channel = tch
 
-    # 3) canal de entrada (permissões + painel)
+    # 3) entrada (permissões + painel premium)
     panel_sent = 0
     if entry_channel:
         await ensure_entry_channel_visibility(guild, entry_channel)
         try:
-            # (sem TAG no texto)
-            await entry_channel.send(
-                f"🧟 **{CLAN_NAME} — Entrada**\n\n"
-                f"- Jogo: **{GAME_NAME}**\n\n"
-                f"Clique em **Liberar acesso** para ver os canais do clã.",
-                view=EntryView(),
-            )
+            await entry_channel.send(embed=build_entry_embed(), view=EntryView())
             panel_sent = 1
         except discord.Forbidden:
             pass
 
-    # 4) purge total
+    # 4) purge total (agressivo)
     del_ch = del_cat = 0
     if AGGRESSIVE_CHANNELS:
         del_ch, del_cat = await aggressive_purge_not_in_config(guild, cats)
@@ -806,16 +1046,24 @@ async def setup_cmd(interaction: discord.Interaction):
     # 5) membros
     pending_added, pending_removed, without_member, bypass_count = await enforce_membership(guild)
 
-    # 6) (ALTERAÇÃO 1) garantir que pendente não escreva em NENHUM chat
-    locked_text = await ensure_pending_cannot_write_any_text(guild, entry_channel)
+    # 6) garantir pendente sem escrever em qualquer chat
+    locked_text = await ensure_pending_cannot_write_any_text(guild)
+
+    # 7) premium: avisos/regras somente leitura + logs privados
+    ro_changed = await ensure_read_only_channels(guild, cats)
+    logs_priv = await ensure_logs_privacy(guild)
+
+    await log_event(guild, f"🧾 Setup rodado por: {interaction.user} | del_ch={del_ch} del_cat={del_cat} rdel={rdel}")
 
     await interaction.followup.send(
         "✅ Setup finalizado.\n"
         f"🧹 Limpeza: canais removidos **{del_ch}**, categorias removidas **{del_cat}**.\n"
         f"🎭 Cargos: sync **{ru}**, removidos **{rdel}**, ignorados **{rskip}**.\n"
-        f"🧾 Acesso: pendentes adicionados **{pending_added}**, pendentes removidos **{pending_removed}**.\n"
-        f"📌 Sem '{ROLE_MEMBER}': **{without_member}** | bypass: **{bypass_count}**.\n"
-        f"🔒 Chats: bloqueio de escrita p/ '{ROLE_PENDING}' aplicado em **{locked_text}** canais de texto.\n"
+        f"🧾 Registro: pendentes adicionados **{pending_added}**, pendentes removidos **{pending_removed}**.\n"
+        f"📌 Sem '{ROLE_MEMBER}': **{without_member}** | staff bypass: **{bypass_count}**.\n"
+        f"🔒 Chats: bloqueio p/ '{ROLE_PENDING}' aplicado em **{locked_text}** canais.\n"
+        f"📌 Somente leitura (avisos/regras): **{ro_changed}** canais ajustados.\n"
+        f"🧾 Logs privados: aplicado **{logs_priv}**.\n"
         f"🧩 Painel enviado: **{panel_sent}**.",
         ephemeral=True,
     )
@@ -851,7 +1099,7 @@ async def status_membros(interaction: discord.Interaction):
     await interaction.response.send_message(
         f"📌 Sem '{ROLE_MEMBER}': **{without_member}**\n"
         f"⛔ Com '{ROLE_PENDING}': **{pending}**\n"
-        f"🛡️ Bypass: **{bypass}**",
+        f"🛡️ Staff bypass: **{bypass}**",
         ephemeral=True,
     )
 
@@ -861,8 +1109,7 @@ async def audit_members():
     for guild in bot.guilds:
         try:
             await enforce_membership(guild)
-            # mantém regra de bloqueio também no audit
-            await ensure_pending_cannot_write_any_text(guild, None)
+            await ensure_pending_cannot_write_any_text(guild)
         except Exception:
             pass
 
